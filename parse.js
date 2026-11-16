@@ -41,7 +41,6 @@ const R_ITEM_FENCE = indentRules((n) => new RegExp(`^ {0,${n}}(?:\`\`\`|~~~)`));
 const R_ITEM_HEADING = indentRules((n) => new RegExp(`^ {0,${n}}#{1,6}(?:\\s|$)`));
 const R_ITEM_HTML = indentRules((n) => new RegExp(`^ {0,${n}}(?:</?(?:${TAGS})(?: +|$|/?>)|<(?:(?:script|pre|style|textarea)(?:[\\s>]|$)|!--)|<\\?|<![A-Za-z]|<!\\[CDATA\\[)`, 'i'));
 const R_ITEM_BQ = indentRules((n) => new RegExp(`^ {0,${n}}>`));
-const ruleFor = (rules, indent) => rules[Math.max(0, Math.min(3, indent - 1))];
 
 // ---------------------------------------------------------------------------------------
 // Inline rules (marked's gfm inline grammar, compiled)
@@ -178,6 +177,12 @@ function splitCells(row, count) {
   return cells;
 }
 
+/** The text before the first line feed (all of `s` when it has none). */
+function firstLine(s) {
+  const i = s.indexOf('\n');
+  return i < 0 ? s : s.slice(0, i);
+}
+
 const lastCodePoint = (s) => {
   const n = s.length;
   if (n === 0) return '';
@@ -236,8 +241,13 @@ function queueInline(src, tok) {
 function blockTokens(src, tokens, clipped) {
   let m, tok, last;
   while (src) {
+    // Gate every rule on the first character it can start with (after up to 3 spaces).
+    const c0 = src.charCodeAt(0);
+    let j = 0;
+    while (j < 3 && src.charCodeAt(j) === 32) j++;
+    const c = src.charCodeAt(j);
     // space
-    if ((m = R_NEWLINE.exec(src)) && m[0].length > 0) {
+    if ((c0 === 10 || c0 === 32 || c0 === 9) && (m = R_NEWLINE.exec(src)) && m[0].length > 0) {
       const raw = m[0];
       src = src.substring(raw.length);
       last = tokens[tokens.length - 1];
@@ -246,7 +256,7 @@ function blockTokens(src, tokens, clipped) {
       continue;
     }
     // indented code
-    if ((m = R_CODE.exec(src))) {
+    if ((c === 32 || c === 9) && (m = R_CODE.exec(src))) {
       const raw = trimBlankTail(m[0]);
       const text = raw.replace(/^(?: {0,3}\t| {1,4})/gm, '');
       src = src.substring(raw.length);
@@ -258,23 +268,23 @@ function blockTokens(src, tokens, clipped) {
       } else tokens.push({ type: T_CODE, raw, text, lang: undefined });
       continue;
     }
-    if ((tok = fences(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
-    if ((tok = heading(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
-    if ((m = R_HR.exec(src))) {
+    if ((c === 96 || c === 126) && (tok = fences(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
+    if (c === 35 && (tok = heading(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
+    if ((c === 45 || c === 95 || c === 42) && (m = R_HR.exec(src))) {
       const raw = rtrim(m[0], '\n');
       src = src.substring(raw.length);
       tokens.push({ type: T_HR, raw });
       continue;
     }
-    if ((tok = blockquote(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
-    if ((tok = list(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
-    if ((m = R_HTML.exec(src))) {
+    if (c === 62 && (tok = blockquote(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
+    if ((c === 45 || c === 42 || c === 43 || (c >= 48 && c <= 57)) && (tok = list(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
+    if (c === 60 && (m = R_HTML.exec(src))) {
       const raw = trimBlankTail(m[0]);
       src = src.substring(raw.length);
       tokens.push({ type: T_HTML, raw, text: raw });
       continue;
     }
-    if ((tok = def(src))) {
+    if (c === 91 && (tok = def(src))) {
       src = src.substring(tok.raw.length);
       last = tokens[tokens.length - 1];
       if (last !== undefined && (last.type === T_PARAGRAPH || last.type === T_TEXT)) {
@@ -287,8 +297,8 @@ function blockTokens(src, tokens, clipped) {
       }
       continue;
     }
-    if ((tok = table(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
-    if ((m = R_LHEADING.exec(src))) {
+    if (secondLineMayDelimitTable(src) && (tok = table(src))) { src = src.substring(tok.raw.length); tokens.push(tok); continue; }
+    if (mayBeSetext(src) && (m = R_LHEADING.exec(src))) {
       const text = m[1].trim();
       tok = { type: T_HEADING, raw: rtrim(m[0], '\n'), depth: m[2].charAt(0) === '=' ? 1 : 2, text };
       queueInline(text, tok);
@@ -330,6 +340,36 @@ function blockTokens(src, tokens, clipped) {
   }
   top = true;
   return tokens;
+}
+
+/** A gfm table needs its second line to open (after up to 3 spaces) with |, : or -. */
+function secondLineMayDelimitTable(src) {
+  let i = src.indexOf('\n');
+  if (i < 0) return false;
+  i++;
+  const end = i + 3;
+  while (i < end && src.charCodeAt(i) === 32) i++;
+  const c = src.charCodeAt(i);
+  return c === 124 || c === 58 || c === 45;
+}
+
+/** A setext heading needs, before the first blank line, a line opening (after up to 3 spaces) with = or -. */
+function mayBeSetext(src) {
+  let i = src.indexOf('\n');
+  while (i >= 0) {
+    i++;
+    let k = i;
+    const end = i + 3;
+    while (k < end && src.charCodeAt(k) === 32) k++;
+    const c = src.charCodeAt(k);
+    if (c === 61 || c === 45) return true;
+    // stop at a blank line: the heading's text cannot cross one
+    let b = i;
+    while (src.charCodeAt(b) === 32 || src.charCodeAt(b) === 9) b++;
+    if (b >= src.length || src.charCodeAt(b) === 10) return false;
+    i = src.indexOf('\n', i);
+  }
+  return false;
 }
 
 function fences(src) {
@@ -450,15 +490,15 @@ function list(src) {
     if (!(m = itemRe.exec(src)) || R_HR.test(src)) break;
     const start = orig.length - src.length;
     src = src.substring(m[0].length);
-    const firstLine = m[2].split('\n', 1)[0];
+    const itemLine = firstLine(m[2]);
     const markLen = m[1].length;
-    let line = firstLine.replace(R_LEAD_WS, (v) => expandTabs(v, markLen));
-    let nextLine = src.split('\n', 1)[0];
-    let blank = !line.trim();
+    let line = expandLeading(itemLine, markLen);
+    let nextLine = firstLine(src);
+    let blank = isBlank(line);
     let indent = 0;
     if (blank) indent = markLen + 1;
     else {
-      indent = line.search(R_NON_SPACE);
+      indent = firstNonSpace(line);
       indent = indent > 4 ? 1 : indent;
       content = line.slice(indent);
       indent += markLen;
@@ -468,25 +508,21 @@ function list(src) {
       endEarly = true;
     }
     if (!endEarly) {
-      const rBullet = ruleFor(R_NEXT_BULLET, indent);
-      const rHr = ruleFor(R_ITEM_HR, indent);
-      const rFence = ruleFor(R_ITEM_FENCE, indent);
-      const rHeading = ruleFor(R_ITEM_HEADING, indent);
-      const rHtml = ruleFor(R_ITEM_HTML, indent);
-      const rBq = ruleFor(R_ITEM_BQ, indent);
+      const cap = Math.max(0, Math.min(3, indent - 1));
       while (src) {
-        const rawLine = src.split('\n', 1)[0];
+        const rawLine = firstLine(src);
         nextLine = rawLine;
-        const expanded = nextLine.replace(R_LEAD_WS, (v) => expandTabs(v));
-        if (rFence.test(nextLine) || rHeading.test(nextLine) || rHtml.test(nextLine) || rBq.test(nextLine) || rBullet.test(nextLine) || rHr.test(nextLine)) break;
-        if (expanded.search(R_NON_SPACE) >= indent || !nextLine.trim()) {
+        const expanded = expandLeading(nextLine, 0);
+        if (endsItem(nextLine, cap, true)) break;
+        const lineBlank = isBlank(nextLine);
+        if (lineBlank || firstNonSpace(expanded) >= indent) {
           content += '\n' + expanded.slice(indent);
         } else {
-          if (blank || line.replace(/\t/g, '    ').search(R_NON_SPACE) >= 4 || rFence.test(line) || rHeading.test(line) || rHtml.test(line) || rHr.test(line)) break;
+          if (blank || tabbedIndent(line) >= 4 || endsItem(line, cap, false)) break;
           const add = /^ {0,3}(?:=+|-+) *$/.test(nextLine) && R_LHEADING.test(`${line}\n${nextLine}`) ? `    ${expanded.replace(/^ {0,3}/, '')}` : nextLine;
           content += '\n' + add;
         }
-        blank = !nextLine.trim();
+        blank = lineBlank;
         src = src.substring(rawLine.length + 1);
         line = expanded.slice(indent);
       }
@@ -536,6 +572,71 @@ function list(src) {
     for (const item of lst.items) for (const t of item.tokens) if (t.type === T_TEXT) t.type = T_PARAGRAPH;
   }
   return lst;
+}
+
+/**
+ * Whether `line` opens a block that ends a list item whose content sits at `cap`+1 columns:
+ * a fence, ATX heading, HTML block start, hr, and (when `full`) a block quote or a new bullet.
+ * Equivalent to marked's per-indent rules, testing a rule only when its first character fits.
+ */
+function endsItem(line, cap, full) {
+  let sp = 0;
+  while (sp < line.length && line.charCodeAt(sp) === 32) sp++;
+  if (sp > cap) return false;
+  const c = line.charCodeAt(sp);
+  switch (c) {
+    case 96: return line.startsWith('```', sp);
+    case 126: return line.startsWith('~~~', sp);
+    case 35: return R_ITEM_HEADING[cap].test(line);
+    case 60: return R_ITEM_HTML[cap].test(line);
+    case 62: return full;
+    case 95: return R_ITEM_HR[cap].test(line);
+    case 42: case 45: return (full && R_NEXT_BULLET[cap].test(line)) || R_ITEM_HR[cap].test(line);
+    case 43: return full && R_NEXT_BULLET[cap].test(line);
+    default: return full && c >= 48 && c <= 57 && R_NEXT_BULLET[cap].test(line);
+  }
+}
+
+/** marked's leading-tab expansion of a line (tabs in its leading blanks become spaces). */
+function expandLeading(s, col) {
+  let i = 0;
+  let tab = false;
+  for (; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 9) tab = true;
+    else if (c !== 32) break;
+  }
+  return tab ? expandTabs(s.slice(0, i), col) + s.slice(i) : s;
+}
+
+/** Index of the first character that is not a space, or -1. */
+function firstNonSpace(s) {
+  for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) !== 32) return i;
+  return -1;
+}
+
+/** Columns of leading blanks counting a tab as 4 (marked's tab-to-4-spaces search), -1 if all blank. */
+function tabbedIndent(s) {
+  let col = 0;
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 32) col++;
+    else if (c === 9) col += 4;
+    else return col;
+  }
+  return -1;
+}
+
+/** !s.trim(): every character is JavaScript whitespace. */
+function isBlank(s) {
+  for (let i = 0; i < s.length; i++) {
+    const c = s.charCodeAt(i);
+    if (c === 32 || (c >= 9 && c <= 13)) continue;
+    if (c < 0xa0) return false;
+    if (c === 0xa0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200a) || c === 0x2028 || c === 0x2029 || c === 0x202f || c === 0x205f || c === 0x3000 || c === 0xfeff) continue;
+    return false;
+  }
+  return true;
 }
 
 function def(src) {
@@ -674,15 +775,16 @@ function lexInline(e, masked, plain) {
   while (e) {
     if (!keepPrev) prevChar = '';
     keepPrev = false;
+    const c = e.charCodeAt(0);
     // escape
-    if ((m = R_ESCAPE.exec(e))) {
+    if (c === 92 && (m = R_ESCAPE.exec(e))) {
       flush();
       out += plain ? m[1] : escapeHtml(m[1], false);
       e = e.substring(m[0].length);
       continue;
     }
     // tag
-    if ((m = R_TAG.exec(e))) {
+    if (c === 60 && (m = R_TAG.exec(e))) {
       const raw = m[0];
       if (!inLink && /^<a /i.test(raw)) inLink = true;
       else if (inLink && /^<\/a>/i.test(raw)) inLink = false;
@@ -694,14 +796,14 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // link
-    if ((r = link(e, plain)) !== null) {
+    if ((c === 91 || c === 33) && (r = link(e, plain)) !== null) {
       flush();
       out += r.html;
       e = e.substring(r.raw.length);
       continue;
     }
     // reflink / nolink
-    if ((r = reflink(e, plain)) !== null) {
+    if ((c === 91 || c === 33) && (r = reflink(e, plain)) !== null) {
       e = e.substring(r.raw.length);
       if (r.html === null) {
         if (text === null) { text = r.raw; textEsc = false; } else text += r.raw;
@@ -712,14 +814,14 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // em / strong
-    if ((r = emStrong(e, masked, prevChar, plain)) !== null) {
+    if ((c === 42 || c === 95) && (r = emStrong(e, masked, prevChar, plain)) !== null) {
       flush();
       out += r.html;
       e = e.substring(r.raw.length);
       continue;
     }
     // code span
-    if ((m = R_CODESPAN.exec(e))) {
+    if (c === 96 && (m = R_CODESPAN.exec(e))) {
       let t = m[2].replace(/\n/g, ' ');
       if (/[^ ]/.test(t) && t.startsWith(' ') && t.endsWith(' ')) t = t.substring(1, t.length - 1);
       flush();
@@ -728,21 +830,21 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // br
-    if ((m = R_BR.exec(e))) {
+    if ((c === 32 || c === 92) && (m = R_BR.exec(e))) {
       flush();
       if (!plain) out += '<br>';
       e = e.substring(m[0].length);
       continue;
     }
     // del
-    if ((r = del(e, masked, prevChar, plain)) !== null) {
+    if (c === 126 && (r = del(e, masked, prevChar, plain)) !== null) {
       flush();
       out += r.html;
       e = e.substring(r.raw.length);
       continue;
     }
     // autolink
-    if ((m = R_AUTOLINK.exec(e))) {
+    if (c === 60 && (m = R_AUTOLINK.exec(e))) {
       const t = m[1];
       const href = m[2] === '@' ? 'mailto:' + t : t;
       flush();
@@ -751,7 +853,7 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // url (gfm)
-    if (!inLink && (m = R_URL.exec(e))) {
+    if (!inLink && URL_START[c] === 1 && (m = R_URL.exec(e))) {
       let raw, href;
       if (m[2] === '@') {
         raw = m[0];
@@ -786,6 +888,10 @@ function lexInline(e, masked, plain) {
   flush();
   return out;
 }
+
+// First characters a gfm url / email autolink can start with: [A-Za-z0-9._+-].
+const URL_START = new Uint8Array(128);
+for (const ch of 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-') URL_START[ch.charCodeAt(0)] = 1;
 
 function autolinkHtml(href, text) {
   const t = escapeHtml(text, true);
