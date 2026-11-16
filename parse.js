@@ -512,10 +512,20 @@ function list(src) {
       while (src) {
         const rawLine = firstLine(src);
         nextLine = rawLine;
-        const expanded = expandLeading(nextLine, 0);
-        if (endsItem(nextLine, cap, true)) break;
-        const lineBlank = isBlank(nextLine);
-        if (lineBlank || firstNonSpace(expanded) >= indent) {
+        // one pass over the leading blanks: tab present? where does the text start?
+        let w = 0;
+        let tab = false;
+        for (; w < rawLine.length; w++) {
+          const ch = rawLine.charCodeAt(w);
+          if (ch === 9) tab = true;
+          else if (ch !== 32) break;
+        }
+        const expanded = tab ? expandTabs(rawLine.slice(0, w)) + rawLine.slice(w) : rawLine;
+        if (w <= cap && endsItem(nextLine, cap, true)) break;
+        const wc = rawLine.charCodeAt(w);
+        const lineBlank = w === rawLine.length || ((wc <= 13 || wc >= 0xa0) && isBlank(rawLine));
+        // first non-space column of `expanded` (leading tabs expand to spaces; text starts after)
+        if (lineBlank || (tab ? expanded.length - (rawLine.length - w) : w) >= indent) {
           content += '\n' + expanded.slice(indent);
         } else {
           if (blank || tabbedIndent(line) >= 4 || endsItem(line, cap, false)) break;
@@ -530,7 +540,7 @@ function list(src) {
     const raw = orig.slice(start, orig.length - src.length);
     if (!lst.loose) {
       if (endsWithBlank) lst.loose = true;
-      else if (/\n[ \t]*\n[ \t]*$/.test(raw)) endsWithBlank = true;
+      else if (endsWithBlankLine(raw)) endsWithBlank = true;
     }
     lst.items.push({ raw, task: R_TASK.test(content), checked: false, text: content, tokens: null });
   }
@@ -595,6 +605,16 @@ function endsItem(line, cap, full) {
     case 43: return full && R_NEXT_BULLET[cap].test(line);
     default: return full && c >= 48 && c <= 57 && R_NEXT_BULLET[cap].test(line);
   }
+}
+
+/** /\n[ \t]*\n[ \t]*$/.test(s), scanning back from the end only. */
+function endsWithBlankLine(s) {
+  let i = s.length - 1;
+  while (i >= 0 && (s.charCodeAt(i) === 32 || s.charCodeAt(i) === 9)) i--;
+  if (i < 0 || s.charCodeAt(i) !== 10) return false;
+  i--;
+  while (i >= 0 && (s.charCodeAt(i) === 32 || s.charCodeAt(i) === 9)) i--;
+  return i >= 0 && s.charCodeAt(i) === 10;
 }
 
 /** marked's leading-tab expansion of a line (tabs in its leading blanks become spaces). */
