@@ -683,27 +683,36 @@ function table(src) {
 // Inline lexer: renders HTML (or, with `plain`, the alt text of images) directly
 // ---------------------------------------------------------------------------------------
 
-// The masked source and the last possible closer positions of the inline run being lexed.
-let maskEm; // {'*': idx, '_': idx}
-let maskDel;
+// The inline source being lexed, its emphasis mask (built on first use) and the last possible
+// closer position of each delimiter in it (-2: not looked up yet).
+let curSrc = '';
+let curMask = null;
+let curAst = -2, curUnd = -2, curDel = -2;
 
-function lastCloserIndexes(s) {
-  let ast = -1, und = -1, del = -1;
-  const n = s.length;
-  for (let i = 0; i < n; i++) {
-    const c = s[i];
-    if (c !== '*' && c !== '_' && c !== '~') continue;
-    const before = i === 0 ? '\n' : s[i - 1];
-    let j = i + 1;
-    while (j < n && s[j] === c) j++;
-    if (before !== ' ' && before !== '\t' && before !== '\n' && before !== '\r' && before !== '\f') {
-      if (c === '~') del = i;
-      else if (c === '*') ast = i;
-      else und = i;
-    }
-    i = j - 1;
+function getMask() {
+  if (curMask === null) curMask = maskSource(curSrc);
+  return curMask;
+}
+
+/** Start of the last run of `ch` (code `code`) in s whose preceding character is not [ \t\n\r\f]. */
+function lastRunStart(s, ch, code) {
+  let k = s.lastIndexOf(ch);
+  while (k > 0) {
+    let r = k;
+    while (r > 0 && s.charCodeAt(r - 1) === code) r--;
+    if (r === 0) return -1;
+    const b = s.charCodeAt(r - 1);
+    if (b !== 32 && b !== 9 && b !== 10 && b !== 13 && b !== 12) return r;
+    k = s.lastIndexOf(ch, r - 1);
   }
-  return [ast, und, del];
+  return -1;
+}
+
+function lastCloser(code) {
+  const t = getMask();
+  if (code === 42) return curAst === -2 ? (curAst = lastRunStart(t, '*', 42)) : curAst;
+  if (code === 95) return curUnd === -2 ? (curUnd = lastRunStart(t, '_', 95)) : curUnd;
+  return curDel === -2 ? (curDel = lastRunStart(t, '~', 126)) : curDel;
 }
 
 function linkInText(s) {
@@ -744,25 +753,21 @@ function maskSource(src) {
 function inline(src, plain) {
   const savedParen = linkParenPossible;
   linkParenPossible = savedParen && src.includes(')');
-  const savedEm = maskEm, savedDel = maskDel;
-  let masked = src;
-  if (src.includes('*') || src.includes('_') || src.includes('~')) {
-    masked = maskSource(src);
-    const idx = lastCloserIndexes(masked);
-    maskEm = { '*': idx[0], '_': idx[1] };
-    maskDel = idx[2];
-  } else {
-    maskEm = { '*': -1, '_': -1 };
-    maskDel = -1;
-  }
-  const out = lexInline(src, masked, plain);
-  maskEm = savedEm;
-  maskDel = savedDel;
+  const sSrc = curSrc, sMask = curMask, sAst = curAst, sUnd = curUnd, sDel = curDel;
+  curSrc = src;
+  curMask = null;
+  curAst = curUnd = curDel = -2;
+  const out = lexInline(src, plain);
+  curSrc = sSrc;
+  curMask = sMask;
+  curAst = sAst;
+  curUnd = sUnd;
+  curDel = sDel;
   linkParenPossible = savedParen;
   return out;
 }
 
-function lexInline(e, masked, plain) {
+function lexInline(e, plain) {
   let out = '';
   let text = null; // pending text run (merged as marked merges adjacent text tokens)
   let textEsc = false;
@@ -817,7 +822,7 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // em / strong
-    if ((c === 42 || c === 95) && (r = emStrong(e, masked, prevChar, plain)) !== null) {
+    if ((c === 42 || c === 95) && (r = emStrong(e, prevChar, plain)) !== null) {
       flush();
       out += r.html;
       e = e.substring(r.raw.length);
@@ -840,7 +845,7 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // del
-    if (c === 126 && (r = del(e, masked, prevChar, plain)) !== null) {
+    if (c === 126 && (r = del(e, prevChar, plain)) !== null) {
       flush();
       out += r.html;
       e = e.substring(r.raw.length);
@@ -1005,9 +1010,10 @@ function reflink(e, plain) {
   return outputLink(m[1], m[0], ref.href, ref.title || null, plain);
 }
 
-function emStrong(e, t, prevChar, plain) {
+function emStrong(e, prevChar, plain) {
   let s = R_EMSTRONG_L.exec(e);
   if (!s || (!s[1] && !s[2] && !s[3] && !s[4])) return null;
+  let t = getMask();
   const ch = s[0][0];
   const sameAsPrev = prevChar === ch;
   const i = t.length - e.length;
@@ -1027,7 +1033,7 @@ function emStrong(e, t, prevChar, plain) {
   const R = !!p.trim() && (!!d || (ch === '*' && !pPunct));
   if (ch !== '*' && ch !== '_') return null;
   const A = ch === '*' ? R_EMSTRONG_R_AST : R_EMSTRONG_R_UND;
-  const v = maskEm[ch];
+  const v = lastCloser(ch === '*' ? 42 : 95);
   const Q = t.length - e.length + k;
   if (v < Q) return null;
   t = t.slice(-1 * e.length + k);
@@ -1057,13 +1063,14 @@ function emStrong(e, t, prevChar, plain) {
   return null;
 }
 
-function del(e, t, prevChar, plain) {
+function del(e, prevChar, plain) {
   let s = R_DEL_L.exec(e);
   if (!s) return null;
   if (s[1] && prevChar && !R_PUNCTUATION.exec(prevChar)) return null;
+  let t = getMask();
   const o = cpLength(s[0]) - 1;
   let p = o;
-  const u = maskDel;
+  const u = lastCloser(126);
   const d = t.length - e.length + o;
   if (u < d) return null;
   t = t.slice(-1 * e.length + o);
