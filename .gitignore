@@ -1,0 +1,5 @@
+node_modules/
+*.cpuprofile
+*keypair*.json
+wallet.json
+.env
