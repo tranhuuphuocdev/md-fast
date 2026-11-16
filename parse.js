@@ -770,133 +770,186 @@ function inline(src, plain) {
   return out;
 }
 
-function lexInline(e, plain) {
+// Sticky twins of the inline rules, run at a position of the whole inline source (lastIndex)
+// instead of on a fresh suffix: `^` anchors dropped, `y` added. No rule here looks behind its
+// start, so matching at a position equals matching on the suffix.
+const sticky = (re) => new RegExp(re.source.replace(/^\^/, '').replace(/\|\^/g, '|'), 'y' + re.flags.replace(/[gy]/g, ''));
+const Y_TAG = sticky(R_TAG);
+const Y_CODESPAN = sticky(R_CODESPAN);
+const Y_BR = sticky(R_BR);
+const Y_AUTOLINK = sticky(R_AUTOLINK);
+const Y_URL = sticky(R_URL);
+const Y_TEXT = sticky(R_INLINE_TEXT);
+
+// ASCII punctuation a backslash escapes (marked's inline escape rule).
+const ESCAPABLE = new Uint8Array(128);
+for (const ch of '!"#$%&\'()*+,-./:;<=>?@[]\\^_`{|}~') ESCAPABLE[ch.charCodeAt(0)] = 1;
+
+function lexInline(src, plain) {
+  const n = src.length;
+  let pos = 0;
   let out = '';
-  let text = null; // pending text run (merged as marked merges adjacent text tokens)
+  // Pending text (adjacent text tokens merge before escaping, as marked merges them): the
+  // finished part `text` plus the raw run src[run, pos) not sliced out yet.
+  let text = null;
+  let run = -1;
   let textEsc = false;
   let keepPrev = false;
   let prevChar = '';
-  let m, r;
-  const flush = () => {
-    if (text !== null) {
-      out += plain || textEsc ? text : escapeHtml(text, false);
-      text = null;
-    }
-  };
-  while (e) {
+  let m, r, end;
+  while (pos < n) {
     if (!keepPrev) prevChar = '';
     keepPrev = false;
-    const c = e.charCodeAt(0);
-    // escape
-    if (c === 92 && (m = R_ESCAPE.exec(e))) {
-      flush();
-      out += plain ? m[1] : escapeHtml(m[1], false);
-      e = e.substring(m[0].length);
-      continue;
-    }
-    // tag
-    if (c === 60 && (m = R_TAG.exec(e))) {
-      const raw = m[0];
-      if (!inLink && /^<a /i.test(raw)) inLink = true;
-      else if (inLink && /^<\/a>/i.test(raw)) inLink = false;
-      if (!inRawBlock && /^<(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = true;
-      else if (inRawBlock && /^<\/(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = false;
-      flush();
-      out += raw;
-      e = e.substring(raw.length);
-      continue;
-    }
-    // link
-    if ((c === 91 || (c === 33 && e.charCodeAt(1) === 91)) && (r = link(e, plain)) !== null) {
-      flush();
-      out += r.html;
-      e = e.substring(r.raw.length);
-      continue;
-    }
-    // reflink / nolink
-    if ((c === 91 || (c === 33 && e.charCodeAt(1) === 91)) && (r = reflink(e, plain)) !== null) {
-      e = e.substring(r.raw.length);
-      if (r.html === null) {
-        if (text === null) { text = r.raw; textEsc = false; } else text += r.raw;
-      } else {
-        flush();
-        out += r.html;
+    const c = src.charCodeAt(pos);
+    let html = null; // the token's output when it is not text
+    switch (c) {
+      case 92: { // backslash: escape, or a hard break
+        const d = src.charCodeAt(pos + 1);
+        if (d < 128 && ESCAPABLE[d] === 1) {
+          const ch = src[pos + 1];
+          html = plain ? ch : escapeHtml(ch, false);
+          end = pos + 2;
+        } else if (d === 10) {
+          Y_BR.lastIndex = pos;
+          if (Y_BR.test(src)) {
+            html = plain ? '' : '<br>';
+            end = Y_BR.lastIndex;
+          }
+        }
+        break;
       }
-      continue;
+      case 60: { // <: raw html tag, then autolink
+        Y_TAG.lastIndex = pos;
+        if (Y_TAG.test(src)) {
+          end = Y_TAG.lastIndex;
+          const raw = src.slice(pos, end);
+          if (!inLink && /^<a /i.test(raw)) inLink = true;
+          else if (inLink && /^<\/a>/i.test(raw)) inLink = false;
+          if (!inRawBlock && /^<(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = true;
+          else if (inRawBlock && /^<\/(pre|code|kbd|script)(\s|>)/i.test(raw)) inRawBlock = false;
+          html = raw;
+          break;
+        }
+        Y_AUTOLINK.lastIndex = pos;
+        if ((m = Y_AUTOLINK.exec(src)) !== null) {
+          const t = m[1];
+          html = plain ? t : autolinkHtml(m[2] === '@' ? 'mailto:' + t : t, t);
+          end = Y_AUTOLINK.lastIndex;
+        }
+        break;
+      }
+      case 33: // ![ image
+        if (src.charCodeAt(pos + 1) !== 91) break;
+      // falls through
+      case 91: { // [ link, reference link, or a bare bracket (text)
+        const e = src.slice(pos);
+        if ((r = link(e, plain)) !== null) {
+          html = r.html;
+          end = pos + r.raw.length;
+        } else if ((r = reflink(e, plain)) !== null) {
+          end = pos + r.raw.length;
+          if (r.html !== null) html = r.html;
+          else {
+            // marked's reflink yields a text token here, merged like any text (never decoded)
+            if (text === null && run < 0) textEsc = false;
+            if (run < 0) run = pos;
+            pos = end;
+            continue;
+          }
+        }
+        break;
+      }
+      case 42:
+      case 95:
+        if ((r = emStrong(src.slice(pos), prevChar, plain)) !== null) {
+          html = r.html;
+          end = pos + r.raw.length;
+        }
+        break;
+      case 96: // code span
+        Y_CODESPAN.lastIndex = pos;
+        if (Y_CODESPAN.test(src)) {
+          end = Y_CODESPAN.lastIndex;
+          let ticks = 1;
+          while (src.charCodeAt(pos + ticks) === 96) ticks++;
+          let t = src.slice(pos + ticks, end - ticks).replace(/\n/g, ' ');
+          if (/[^ ]/.test(t) && t.startsWith(' ') && t.endsWith(' ')) t = t.substring(1, t.length - 1);
+          html = plain ? t : '<code>' + escapeHtml(t, true) + '</code>';
+        }
+        break;
+      case 32: // two or more spaces before a line feed: hard break
+        if (src.charCodeAt(pos + 1) === 32) {
+          Y_BR.lastIndex = pos;
+          if (Y_BR.test(src)) {
+            html = plain ? '' : '<br>';
+            end = Y_BR.lastIndex;
+          }
+        }
+        break;
+      case 126:
+        if ((r = del(src.slice(pos), prevChar, plain)) !== null) {
+          html = r.html;
+          end = pos + r.raw.length;
+        }
+        break;
     }
-    // em / strong
-    if ((c === 42 || c === 95) && (r = emStrong(e, prevChar, plain)) !== null) {
-      flush();
-      out += r.html;
-      e = e.substring(r.raw.length);
-      continue;
-    }
-    // code span
-    if (c === 96 && (m = R_CODESPAN.exec(e))) {
-      let t = m[2].replace(/\n/g, ' ');
-      if (/[^ ]/.test(t) && t.startsWith(' ') && t.endsWith(' ')) t = t.substring(1, t.length - 1);
-      flush();
-      out += plain ? t : '<code>' + escapeHtml(t, true) + '</code>';
-      e = e.substring(m[0].length);
-      continue;
-    }
-    // br
-    if (((c === 32 && e.charCodeAt(1) === 32) || (c === 92 && e.charCodeAt(1) === 10)) && (m = R_BR.exec(e))) {
-      flush();
-      if (!plain) out += '<br>';
-      e = e.substring(m[0].length);
-      continue;
-    }
-    // del
-    if (c === 126 && (r = del(e, prevChar, plain)) !== null) {
-      flush();
-      out += r.html;
-      e = e.substring(r.raw.length);
-      continue;
-    }
-    // autolink
-    if (c === 60 && (m = R_AUTOLINK.exec(e))) {
-      const t = m[1];
-      const href = m[2] === '@' ? 'mailto:' + t : t;
-      flush();
-      out += plain ? t : autolinkHtml(href, t);
-      e = e.substring(m[0].length);
-      continue;
-    }
-    // url (gfm)
     // gfm url: an http/ftp/www prefix, or an email (mailto:/xmpp: included) needing an @
-    if (!inLink && (curHasAt ? URL_START[c] === 1 : c === 104 || c === 72 || c === 102 || c === 70 || c === 119) && (m = R_URL.exec(e))) {
-      let raw, href;
-      if (m[2] === '@') {
-        raw = m[0];
-        href = 'mailto:' + raw;
-      } else {
-        let prev;
-        raw = m[0];
-        do {
-          prev = raw;
-          const b = R_BACKPEDAL.exec(raw);
-          raw = b ? b[0] : '';
-        } while (prev !== raw);
-        href = m[1] === 'www.' ? 'http://' + raw : raw;
+    if (html === null && !inLink && (curHasAt ? c < 128 && URL_START[c] === 1 : c === 104 || c === 72 || c === 102 || c === 70 || c === 119)) {
+      Y_URL.lastIndex = pos;
+      if ((m = Y_URL.exec(src)) !== null) {
+        let raw, href;
+        if (m[2] === '@') {
+          raw = m[0];
+          href = 'mailto:' + raw;
+        } else {
+          let prev;
+          raw = m[0];
+          do {
+            prev = raw;
+            const b = R_BACKPEDAL.exec(raw);
+            raw = b ? b[0] : '';
+          } while (prev !== raw);
+          href = m[1] === 'www.' ? 'http://' + raw : raw;
+        }
+        html = plain ? raw : autolinkHtml(href, raw);
+        end = pos + raw.length;
       }
-      flush();
-      out += plain ? raw : autolinkHtml(href, raw);
-      e = e.substring(raw.length);
+    }
+    if (html !== null) {
+      // flush pending text, then the token
+      if (run >= 0) {
+        text = text === null ? src.slice(run, pos) : text + src.slice(run, pos);
+        run = -1;
+      }
+      if (text !== null) {
+        out += plain || textEsc ? text : escapeHtml(text, false);
+        text = null;
+      }
+      out += html;
+      pos = end;
       continue;
     }
     // text
-    {
-      const raw = R_INLINE_TEXT.exec(e)[0];
-      const len = raw.length;
-      e = e.substring(len);
-      if (raw.charCodeAt(len - 1) !== 95) prevChar = raw[len - 1];
-      keepPrev = true;
-      const t = inRawBlock || raw.indexOf('&#') < 0 ? raw : decodeNumericRefs(raw);
-      if (text === null) { text = t; textEsc = inRawBlock; } else text += t;
-    }
+    Y_TEXT.lastIndex = pos;
+    Y_TEXT.test(src);
+    end = Y_TEXT.lastIndex;
+    const last = src.charCodeAt(end - 1);
+    if (last !== 95) prevChar = src[end - 1];
+    keepPrev = true;
+    if (text === null && run < 0) textEsc = inRawBlock;
+    if (!inRawBlock && src.indexOf('&#', pos) >= 0 && src.indexOf('&#', pos) < end - 1) {
+      // numeric references decode token by token (before merging)
+      if (run >= 0) {
+        text = text === null ? src.slice(run, pos) : text + src.slice(run, pos);
+        run = -1;
+      }
+      const t = decodeNumericRefs(src.slice(pos, end));
+      text = text === null ? t : text + t;
+    } else if (run < 0) run = pos;
+    pos = end;
   }
-  flush();
+  if (run >= 0) text = text === null ? src.slice(run, pos) : text + src.slice(run, pos);
+  if (text !== null) out += plain || textEsc ? text : escapeHtml(text, false);
   return out;
 }
 
