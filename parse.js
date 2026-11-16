@@ -688,6 +688,7 @@ function table(src) {
 let curSrc = '';
 let curMask = null;
 let curAst = -2, curUnd = -2, curDel = -2;
+let curHasAt = false;
 
 function getMask() {
   if (curMask === null) curMask = maskSource(curSrc);
@@ -753,8 +754,9 @@ function maskSource(src) {
 function inline(src, plain) {
   const savedParen = linkParenPossible;
   linkParenPossible = savedParen && src.includes(')');
-  const sSrc = curSrc, sMask = curMask, sAst = curAst, sUnd = curUnd, sDel = curDel;
+  const sSrc = curSrc, sMask = curMask, sAst = curAst, sUnd = curUnd, sDel = curDel, sAt = curHasAt;
   curSrc = src;
+  curHasAt = src.includes('@');
   curMask = null;
   curAst = curUnd = curDel = -2;
   const out = lexInline(src, plain);
@@ -763,6 +765,7 @@ function inline(src, plain) {
   curAst = sAst;
   curUnd = sUnd;
   curDel = sDel;
+  curHasAt = sAt;
   linkParenPossible = savedParen;
   return out;
 }
@@ -838,7 +841,7 @@ function lexInline(e, plain) {
       continue;
     }
     // br
-    if ((c === 32 || c === 92) && (m = R_BR.exec(e))) {
+    if (((c === 32 && e.charCodeAt(1) === 32) || (c === 92 && e.charCodeAt(1) === 10)) && (m = R_BR.exec(e))) {
       flush();
       if (!plain) out += '<br>';
       e = e.substring(m[0].length);
@@ -861,7 +864,8 @@ function lexInline(e, plain) {
       continue;
     }
     // url (gfm)
-    if (!inLink && URL_START[c] === 1 && (m = R_URL.exec(e))) {
+    // gfm url: an http/ftp/www prefix, or an email (mailto:/xmpp: included) needing an @
+    if (!inLink && (curHasAt ? URL_START[c] === 1 : c === 104 || c === 72 || c === 102 || c === 70 || c === 119) && (m = R_URL.exec(e))) {
       let raw, href;
       if (m[2] === '@') {
         raw = m[0];
