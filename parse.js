@@ -731,9 +731,12 @@ function maskRefs(r) {
 
 function maskSource(src) {
   let t = src;
-  if (src.includes('[')) t = t.replace(R_REFLINK_SEARCH, maskRefs);
-  t = t.replace(R_ANY_PUNCT_OUTSIDE_CODE, (all, ticks, esc) => esc ? '+'.repeat(all.length) : ticks ? ticks + all.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks : all);
-  t = t.replace(R_BLOCK_SKIP, (all) => '[' + 'a'.repeat(all.length - 2) + ']');
+  const hasBracket = src.includes('[');
+  const hasTick = src.includes('`');
+  if (hasBracket) t = t.replace(R_REFLINK_SEARCH, maskRefs);
+  // Each pass below only rewrites text holding its trigger characters.
+  if (hasTick || t.includes('\\')) t = t.replace(R_ANY_PUNCT_OUTSIDE_CODE, (all, ticks, esc) => esc ? '+'.repeat(all.length) : ticks ? ticks + all.slice(ticks.length, -ticks.length).replace(/`/g, '+') + ticks : all);
+  if (hasBracket || hasTick || t.includes('<')) t = t.replace(R_BLOCK_SKIP, (all) => '[' + 'a'.repeat(all.length - 2) + ']');
   return t;
 }
 
@@ -796,14 +799,14 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // link
-    if ((c === 91 || c === 33) && (r = link(e, plain)) !== null) {
+    if ((c === 91 || (c === 33 && e.charCodeAt(1) === 91)) && (r = link(e, plain)) !== null) {
       flush();
       out += r.html;
       e = e.substring(r.raw.length);
       continue;
     }
     // reflink / nolink
-    if ((c === 91 || c === 33) && (r = reflink(e, plain)) !== null) {
+    if ((c === 91 || (c === 33 && e.charCodeAt(1) === 91)) && (r = reflink(e, plain)) !== null) {
       e = e.substring(r.raw.length);
       if (r.html === null) {
         if (text === null) { text = r.raw; textEsc = false; } else text += r.raw;
@@ -874,16 +877,15 @@ function lexInline(e, masked, plain) {
       continue;
     }
     // text
-    if ((m = R_INLINE_TEXT.exec(e))) {
-      const raw = m[0];
-      e = e.substring(raw.length);
-      if (raw.charAt(raw.length - 1) !== '_') prevChar = raw.slice(-1);
+    {
+      const raw = R_INLINE_TEXT.exec(e)[0];
+      const len = raw.length;
+      e = e.substring(len);
+      if (raw.charCodeAt(len - 1) !== 95) prevChar = raw[len - 1];
       keepPrev = true;
-      const t = inRawBlock ? raw : decodeNumericRefs(raw);
+      const t = inRawBlock || raw.indexOf('&#') < 0 ? raw : decodeNumericRefs(raw);
       if (text === null) { text = t; textEsc = inRawBlock; } else text += t;
-      continue;
     }
-    if (e) throw new Error('Infinite loop on byte: ' + e.charCodeAt(0));
   }
   flush();
   return out;
